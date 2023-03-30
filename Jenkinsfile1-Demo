@@ -1,0 +1,145 @@
+pipeline {
+    environment{
+        target_url="http://192.168.228.235:8888"
+        Nmap="192.168.228.235"
+    }
+    agent any
+
+    stages {
+        stage('SCM') {
+            steps {
+                git branch: 'master', url: 'https://Mukeshit91@bitbucket.org/Mukeshit91/docker-vulnerable-dvwa.git'
+            }
+        }
+        stage('Detect-secrets'){
+            steps{
+                sh '''detect-secrets scan > detect-secrets.json
+ls -la
+cat detect-secrets.json
+detect-secrets scan --baseline detect-secrets.json'''
+
+sh '''
+             time=$(date +'%Y-%m-%d')        
+		sudo curl --location --request POST 'http://192.168.228.235:8080/api/v2/import-scan/' \
+--header 'Authorization: Token 1349b6e0fc8109dde18fc98a65be0cd35a236367' \
+--form 'engagement="1"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="1"' \
+--form tags=$BUILD_NUMBER \
+--form scan_date=$date \
+--form 'scan_type="Detect-secrets Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' \
+--form 'file=@"detect-secrets.json"'
+
+'''
+            }
+        }
+        stage('SCA'){
+            steps{
+                
+                dependencyCheck additionalArguments: '--format JSON --prettyPrint --scan /var/lib/jenkins/workspace/Demo --version', odcInstallation: 'Dp-check'
+                
+                sh '''
+             time=$(date +'%Y-%m-%d')        
+		sudo curl --location --request POST 'http://192.168.228.235:8080/api/v2/import-scan/' \
+--header 'Authorization: Token 1349b6e0fc8109dde18fc98a65be0cd35a236367' \
+--form 'engagement="1"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="1"' \
+--form tags=$BUILD_NUMBER \
+--form scan_date=$date \
+--form 'scan_type="Dependency Check Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' \
+--form 'file=@"/var/lib/jenkins/workspace/Demo/dependency-check-report.json"'
+
+'''
+            }
+        }
+        
+
+        stage('Trivy-scan'){
+            steps{
+                sh '''/usr/local/bin/trivy conf -f json -o trivy1.json /var/lib/jenkins/workspace/Demo/Dockerfile
+cat trivy1.json
+trivy fs .'''
+
+sh '''
+             time=$(date +'%Y-%m-%d')        
+		sudo curl --location --request POST 'http://192.168.228.235:8080/api/v2/import-scan/' \
+--header 'Authorization: Token 1349b6e0fc8109dde18fc98a65be0cd35a236367' \
+--form 'engagement="1"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="1"' \
+--form tags=$BUILD_NUMBER \
+--form scan_date=$date \
+--form 'scan_type="Trivy Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' \
+--form 'file=@"/var/lib/jenkins/workspace/Demo/trivy1.json"'
+
+'''
+            }
+        }
+        stage('DAST'){
+            steps{
+                sh '''rm zap_report.xml || true
+sudo chmod -R 777 ./
+ls -lrth
+docker run -v $(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py -t $target_url -g gen.conf -x zap_report.xml || true
+cat zap_report.xml'''
+
+sh '''
+             time=$(date +'%Y-%m-%d')        
+		sudo curl --location --request POST 'http://192.168.228.235:8080/api/v2/import-scan/' \
+--header 'Authorization: Token 1349b6e0fc8109dde18fc98a65be0cd35a236367' \
+--form 'engagement="1"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="1"' \
+--form tags=$BUILD_NUMBER \
+--form scan_date=$date \
+--form 'scan_type="ZAP Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' \
+--form 'file=@"/var/lib/jenkins/workspace/Demo/zap_report.xml"'
+
+'''
+            }
+        }
+        stage('Port Scan'){
+            steps{
+                sh '''rm nmap* || true
+docker run --rm -v "$(pwd)":/data uzyexe/nmap -sS -sV -oX nmap $Nmap
+cat nmap'''
+
+sh '''
+             time=$(date +'%Y-%m-%d')        
+		sudo curl --location --request POST 'http://192.168.228.235:8080/api/v2/import-scan/' \
+--header 'Authorization: Token 1349b6e0fc8109dde18fc98a65be0cd35a236367' \
+--form 'engagement="1"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="1"' \
+--form tags=$BUILD_NUMBER \
+--form scan_date=$date \
+--form 'scan_type="Nmap Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' \
+--form 'file=@"/var/lib/jenkins/workspace/Demo/nmap"'
+
+'''
+            }
+        }
+    
+    }
+}
