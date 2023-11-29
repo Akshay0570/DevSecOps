@@ -1,0 +1,156 @@
+pipeline {
+    environment{
+        target_url="http://10.238.70.141:8085"
+        Nmap="10.238.70.141"
+    }
+    agent any
+
+    stages {
+        stage('SCM') {
+            steps {
+                git branch: 'master', url: 'https://Mukeshit91@bitbucket.org/Mukeshit91/docker-vulnerable-dvwa.git'
+            }
+        }
+        stage('Secret-scan'){
+            steps{
+                sh 'pip3 install detect-secrets'
+                //sh 'sudo rm gitsecret_report.xml || true'
+                //sh "chmod +x -R ${env.WORKSPACE}"
+                sh 'ls -la'
+           //sh 'sudo /home/ubuntu/.local/bin/detect-secrets  scan > gitsecret_report.json'
+            //sh 'sudo /home/ubuntu/.local/bin/detect-secrets scan'
+                //sh '/home/ec2-user/.local/bin/detect-secrets  scan > gitsecret_report.json'
+                //sh 'detect-secrets -C . scan >gitsecret_report.xml'
+                sh 'cat gitsecret_report.xml || true'
+                
+sh '''
+             time=$(date +'%Y-%m-%d')        
+		sudo curl --location --request POST 'http://10.238.69.213:8080//api/v2/import-scan/' \
+--header 'Authorization: Token c0f8a858db5026523de359bf315d8284f30f9aa8' \
+--form 'engagement="2"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="1"' \
+--form tags=$BUILD_NUMBER \
+--form scan_date=$date \
+--form 'scan_type="Detect-secrets Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' \
+--form 'file=@"/var/lib/jenkins/workspace/bci/gitsecret_report.xml"'
+
+'''
+            }
+        }
+        stage('Software-composition-Analysis'){
+            steps{
+                //sh 'wget https://github.com/jeremylong/DependencyCheck/releases/download/v8.1.0/dependency-check-8.1.0-release.zip'
+//sh 'unzip dependency-check-8.1.0-release.zip'
+//sh 'sudo rm -r dependency-check-8.1.0-release.zip'
+//sh 'sudo rm dependency-check-report.xml'
+sh 'sudo chmod 775 ${WORKSPACE}/dependency-check/bin/dependency-check.sh'
+sh 'cd dependency-check/bin'
+sh '${WORKSPACE}/dependency-check/bin/dependency-check.sh --project "bci" --prettyPrint --format XML --scan ${WORKSPACE}'
+sh 'ls -lrt'
+sh 'cat dependency-check-report.xml' 
+sh 'pwd'
+
+sh '''
+             time=$(date +'%Y-%m-%d')        
+		sudo curl --location --request POST 'http://10.238.69.213:8080//api/v2/import-scan/' \
+--header 'Authorization: Token c0f8a858db5026523de359bf315d8284f30f9aa8' \
+--form 'engagement="2"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="1"' \
+--form tags=$BUILD_NUMBER \
+--form scan_date=$date \
+--form 'scan_type="Dependency Check Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' \
+--form 'file=@"/var/lib/jenkins/workspace/bci/dependency-check-report.xml"'
+ 
+'''
+            }
+        }
+        stage('Image-scan'){
+            steps{
+                sh '''/usr/bin/trivy conf -f json -o trivy.json /var/lib/jenkins/workspace/bci/Dockerfile
+cat trivy.json
+trivy fs .'''
+
+sh '''
+             time=$(date +'%Y-%m-%d')        
+		sudo curl --location --request POST 'http://10.238.69.213:8080//api/v2/import-scan/' \
+--header 'Authorization: Token c0f8a858db5026523de359bf315d8284f30f9aa8' \
+--form 'engagement="2"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="1"' \
+--form tags=$BUILD_NUMBER \
+--form scan_date=$date \
+--form 'scan_type="Trivy Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' \
+--form 'file=@"/var/lib/jenkins/workspace/bci/trivy.json"'
+
+'''
+            }
+        }
+        stage('DAST'){
+            steps{
+                sh '''sudo rm zap_report.xml || true
+sudo chmod -R 777 ./
+ls -lrth
+docker run -v $(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py -t $target_url -g gen.conf -x zap_report.xml || true
+cat /var/lib/jenkins/workspace/test/zap_report.xml'''
+
+sh '''
+             time=$(date +'%Y-%m-%d')        
+		sudo curl --location --request POST 'http://10.238.69.213:8080//api/v2/import-scan/' \
+--header 'Authorization: Token c0f8a858db5026523de359bf315d8284f30f9aa8' \
+--form 'engagement="2"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="1"' \
+--form tags=$BUILD_NUMBER \
+--form scan_date=$date \
+--form 'scan_type="ZAP Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' \
+--form 'file=@"/var/lib/jenkins/workspace/bci/zap_report.xml"'
+
+'''
+            }
+        }
+        
+        stage('Port-scan'){
+            steps{
+                sh '''rm nmap* || true
+docker run --rm -v "$(pwd)":/data uzyexe/nmap -sS -sV -oX nmap $Nmap
+cat  /var/lib/jenkins/workspace/test/nmap'''
+
+sh '''
+             time=$(date +'%Y-%m-%d')        
+		sudo curl --location --request POST 'http://10.238.69.213:8080//api/v2/import-scan/' \
+--header 'Authorization: Token c0f8a858db5026523de359bf315d8284f30f9aa8' \
+--form 'engagement="2"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="1"' \
+--form tags=$BUILD_NUMBER \
+--form scan_date=$date \
+--form 'scan_type="Nmap Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' \
+--form 'file=@"/var/lib/jenkins/workspace/bci/nmap"'
+
+'''
+            }
+        }
+    }
+}
