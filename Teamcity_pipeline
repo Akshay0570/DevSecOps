@@ -1,0 +1,124 @@
+CI/CD= TeamCity
+*****************Secret-Scanning****************************************
+
+rm trufflehog_results.json || true
+rm trufflehog.json || true
+echo "Current working directory:"
+pwd
+docker run --rm -v %system.teamcity.build.checkoutDir%/app:/checkoutDir:rw trufflesecurity/trufflehog:latest filesystem /checkoutDir --json > trufflehog_results.json
+if grep -q "found" trufflehog_results.json; then
+    echo "Secrets detected! Failing the build."
+    exit 1
+else
+    echo "No secrets found."
+fi
+echo "**********************************************************************************"
+echo "Pushing report to DefectDojo Server"
+echo %system.build.number%
+curl --location --request POST 'https://dojo' \
+-H "Authorization: Token 275d851110afcdcd9682d63d4e3a16c58435e511" \
+--form 'engagement="2"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="2"' \
+--form 'tags="%system.build.number%"' \
+--form 'scan_type="Trufflehog Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' -F 'file=@"trufflehog_results.json"' -v
+
+**********************Dependency_Check********************************************
+cat requirements.txt
+cat %system.teamcity.build.checkoutDir%/dependency-check-report.xml
+rmdir dependency-check-report.xml || true
+chmod -R 777 %system.teamcity.build.checkoutDir%
+docker pull owasp/dependency-check:latest
+docker run --rm -v %system.teamcity.build.checkoutDir%:/report:rw owasp/dependency-check --scan /report --format XML --project "KuralBackend" --nvdApiKey 6133f9a9-c730-4036-a041-bd7fb3ea001e --out /report
+ls -al
+
+
+
+echo "**********************************************************************************"
+echo "Pushing Report to DefectDojo Server"
+echo %system.build.number%
+curl --location --request POST 'https://dojo' \
+-H "Authorization: Token 275d851110afcdcd9682d63d4e3a16c58435e511" \
+--form 'engagement="2"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="2"' \
+--form 'tags="%system.build.number%"' \
+--form 'scan_type="Dependency Check Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' -F 'file=@"dependency-check-report.xml"' -v
+
+********************Image-Scan******************************************************************
+rm trivy-report.json || true
+chmod -R 777 %system.teamcity.build.checkoutDir%
+
+# Run Trivy to scan the Dockerfile and save the report
+docker run --rm -v %system.teamcity.build.checkoutDir%:/project aquasec/trivy:latest config --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL --format json -o /project/trivy-report.json /project/Dockerfile
+ls -al %system.teamcity.build.checkoutDir%
+
+
+echo "**********************************************************************************"
+echo "Pushing Report to DefectDojo Server"
+echo %system.build.number%
+curl --location --request POST 'https:defectdojo' \
+-H "Authorization: Token 275d851110afcdcd9682d63d4e3a16c58435e511" \
+--form 'engagement="2"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="2"' \
+--form 'tags="%system.build.number%"' \
+--form 'scan_type="Trivy Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' -F 'file=@"trivy-report.json"' -v
+
+************************************DAST***********************************
+
+docker run --rm -v %system.teamcity.build.checkoutDir%:/zap/wrk/:rw zaproxy/zap-stable zap-full-scan.py -t https://services.com -g gen.conf -x OWASP-ZAP-Report.xml -r OWASP-ZAP-Report.html
+ls -al
+cat OWASP-ZAP-Report.xml
+
+echo "**********************************************************************************"
+echo "Pushing report to DefectDojo Server"
+echo %system.build.number%
+curl --location --request POST 'https://dojo' \
+-H "Authorization: Token 275d851110afcdcd9682d63d4e3a16c58435e511" \
+--form 'engagement="2"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="2"' \
+--form 'tags="%system.build.number%"' \
+--form 'scan_type="ZAP Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' -F 'file=@"OWASP-ZAP-Report.xml"' -v
+
+**************************Port-Scan******************************************************************
+rm nmap_result.xml || true
+echo "Current working directory:"
+pwd
+echo %hosturl%
+echo %system.build.number%
+docker run --rm -v %system.teamcity.build.checkoutDir%:/data uzyexe/nmap -sS -sV -A -oX /data/nmap_result.xml -p 1-1000 %hosturl%
+ls -al
+cat nmap_result.xml
+
+echo "**********************************************************************************"
+echo "Pushing report to DefectDojo Server"
+echo %system.build.number%
+curl --location --request POST 'https://dojo' \
+-H "Authorization: Token 275d851110afcdcd9682d63d4e3a16c58435e511" \
+--form 'engagement="2"' \
+--form 'verified="true"' \
+--form 'active="true"' \
+--form 'lead="2"' \
+--form 'tags="%system.build.number%"' \
+--form 'scan_type="Nmap Scan"' \
+--form 'minimum_severity="Info"' \
+--form 'skip_duplicates="true"' \
+--form 'close_old_findings="false"' -F 'file=@"nmap_result.xml"' -v
