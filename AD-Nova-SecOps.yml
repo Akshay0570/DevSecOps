@@ -1,0 +1,522 @@
+trigger:
+  branches:
+    include:
+    - DevSecOps1
+    - b1
+    - b2
+    - b3
+pool:
+  name: 'DevSecOps'
+variables:
+- name: buildConfiguration
+  value: 'Release'
+- name: nmap_hosturl
+  value: '10.11.10.200:8062'
+- name: host_url
+  value: 'http://10.11.10.200:8062'
+stages:
+- stage: Security_Scanning_Dev
+  displayName: "Development Security Scanning"
+  condition: eq(variables['Build.SourceBranchName'], 'DevSecOps1')
+  jobs:
+  - job: DevSecurityScan
+    displayName: "Run Secret Scan and SonarQube Analysis in Development"
+    steps:
+    - task: Gitleaks@2
+      displayName: "Secret-Scanning"
+      inputs:
+        scanlocation: '$(Build.SourcesDirectory)'
+        configtype: 'predefined'
+        predefinedconfigfile: 'GitleaksUdmCombo.toml'
+        scanmode: 'all'
+        taskfail: false
+        reportartifactname: 'Secret-Scanning'
+        reportformat: 'json'
+        reportfolder: '$(Build.ArtifactStagingDirectory)'
+        reportname: 'gitleaks-report'
+    - task: CmdLine@2
+      displayName: "Pushing gitleaks report to Defectdojo"
+      inputs:
+        script: |
+          echo "Current Directory: $(pwd)"
+          chmod +x gitleaks-report.json
+          ls -al
+          echo "$(Build.BuildNumber)"
+          curl --location --request POST 'http://10.102.20.13:8080/api/v2/import-scan/' \
+          -H "Authorization: Token 8724ef4e52197036cb2fc3745a1a30c4a56dc52e" \
+          --form 'engagement="3"' \
+          --form 'verified="true"' \
+          --form 'active="true"' \
+          --form 'lead="1"' \
+          --form 'tags="$(Build.BuildNumber)"' \
+          --form 'scan_type="Gitleaks Scan"' \
+          --form 'minimum_severity="Info"' \
+          --form 'skip_duplicates="true"' \
+          --form 'close_old_findings="false"' -F 'file=@"gitleaks-report.json"' -v
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: CmdLine@2
+      inputs:
+        script: |
+          echo "wiz-cli "
+          ./wizcli dir scan --path $(Build.SourcesDirectory)
+        workingDirectory: '/home/zs-pappdevsecvm01-admin/wiz'
+    - task: CmdLine@2
+      displayName: "Granting Permission"
+      inputs:
+        script: |
+          chmod -R 777 $(Build.SourcesDirectory)
+          chmod -R 777  $(Build.SourcesDirectory)/*
+          ls -al $(Build.SourcesDirectory)/*
+    - task: ArchiveFiles@2
+      inputs:
+        rootFolderOrFile: '$(Build.SourcesDirectory)'
+        includeRootFolder: true
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+        replaceExistingArchive: true
+    - task: CmdLine@2
+      displayName: "CheckmarX SAST Scan"
+      inputs:
+        script: |
+          rm cx_sast_result.json || true
+          echo $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+          chmod -R 777 $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+          ls -al $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+          echo "************************Running CheckmarX Scan*************************"
+          ./cx scan create -s "$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip" --branch "$(Build.SourceBranchName)" --scan-types sast --project-groups ZSA --project-name "Novartis" --report-format json --output-name cx_sast_result
+        workingDirectory: '/home/zs-pappdevsecvm01-admin/checkmarX/'
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '/home/zs-pappdevsecvm01-admin/checkmarX/cx_sast_result.json'
+        ArtifactName: 'CheckmarX'
+        publishLocation: 'Container'
+- stage: Build
+  displayName: "Build Stage"
+  dependsOn:
+  - Security_Scanning_Dev
+  condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'DevSecOps1', 'b1', 'b2', 'b3'))
+  jobs:
+  - job: BuildJob
+    displayName: "Build Application"
+    steps:
+    - task: DotNetCoreCLI@2
+      displayName: "DotNet Restore"
+      inputs:
+        command: 'restore'
+        projects: 'NovartisOnboarding.sln'
+        feedsToUse: 'select'
+    - task: DotNetCoreCLI@2
+      displayName: "DotNet build"
+      inputs:
+        command: 'build'
+        projects: 'NovartisOnboarding.sln'
+    - task: DotNetCoreCLI@2
+      displayName: "DotNet Publish"
+      inputs:
+        command: 'publish'
+        publishWebProjects: true
+        arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)'
+    - task: PublishBuildArtifacts@1
+      displayName: "Publish Build Artifact"
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
+        publishLocation: 'Container'
+- stage: 'Deploy'
+  displayName: 'Dev'
+  dependsOn:
+  - 'Build'
+  condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'DevSecOps1'))
+  jobs:
+  - deployment: 'Dev'
+    displayName: 'Deploy to Dev Environment'
+    environment:
+      name: 'Development'
+      resourceType: VirtualMachine
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: 6d15af64-176c-496d-b583-fd2ae21d4df4@1
+            condition: false
+            inputs:
+              repository: none
+          - task: DownloadBuildArtifacts@1
+            inputs:
+              buildType: 'current'
+              downloadType: 'specific'
+              itemPattern: '**/NovartisOnboarding.zip'
+              downloadPath: '$(Build.ArtifactStagingDirectory)'
+          - task: IISWebAppManagementOnMachineGroup@0
+            inputs:
+              IISDeploymentType: 'IISWebsite'
+              ActionIISWebsite: 'StopWebsite'
+              StartStopWebsiteName: 'NovartisOnboardingDevSecOps'
+          - task: IISWebAppDeploymentOnMachineGroup@0
+            inputs:
+              WebSiteName: 'NovartisOnboardingDevSecOps'
+              Package: '$(Build.ArtifactStagingDirectory)\**\*.zip'
+          - task: IISWebAppManagementOnMachineGroup@0
+            inputs:
+              IISDeploymentType: 'IISWebsite'
+              ActionIISWebsite: 'StartWebsite'
+              StartStopWebsiteName: 'NovartisOnboardingDevSecOps'
+- stage: Security_Scanning_Dev_Artifact
+  displayName: "Run Dependency Check on Development Artifact"
+  dependsOn:
+  - Deploy
+  condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'DevSecOps1'))
+  jobs:
+  - job: DevArtifactSecurityScan
+    displayName: "Run Dependency Check on Artifact in Development"
+    steps:
+    - task: DownloadBuildArtifacts@1
+      inputs:
+        buildType: 'current'
+        downloadType: 'specific'
+        itemPattern: '**/NovartisOnboarding.zip'
+        downloadPath: '$(Build.ArtifactStagingDirectory)'
+    - task: CmdLine@2
+      inputs:
+        script: |
+          docker run --rm \
+            -v "$(Build.ArtifactStagingDirectory)/drop:/src" \
+            -v "$(Build.ArtifactStagingDirectory)/drop:/report" \
+            -v "/home/zs-pappdevsecvm01-admin/nvd-data:/usr/share/dependency-check/data" \
+            owasp/dependency-check \
+            --project "Novartis" \
+            --prettyPrint \
+            --nvdApiKey 9197ee9c-a5bb-456b-9cb7-1e9a0aabc7ea \
+            --format XML \
+            --data /usr/share/dependency-check/data \
+            --noupdate \
+            --out /report \
+            --scan /src/NovartisOnboarding.zip
+    - task: PublishBuildArtifacts@1
+      displayName: "Dependency-Check-Artifact"
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/drop/dependency-check-report.xml'
+        ArtifactName: 'Dependency-Check'
+        publishLocation: 'Container'
+    - task: CmdLine@2
+      displayName: "Pushing Dependency Check report to Defectdojo"
+      inputs:
+        script: |
+          echo "Current Directory: $(pwd)"
+          chmod +x dependency-check-report.xml
+          echo "$(Build.BuildNumber)"
+          curl --location --request POST 'http://10.102.20.13:8080/api/v2/import-scan/' \
+          -H "Authorization: Token 8724ef4e52197036cb2fc3745a1a30c4a56dc52e" \
+          --form 'engagement="3"' \
+          --form 'verified="true"' \
+          --form 'active="true"' \
+          --form 'lead="1"' \
+          --form 'tags="$(Build.BuildNumber)"' \
+          --form 'scan_type="Dependency Check Scan"' \
+          --form 'minimum_severity="Info"' \
+          --form 'skip_duplicates="true"' \
+          --form 'close_old_findings="false"' -F 'file=@"dependency-check-report.xml"' -v
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/drop'
+- stage: Security_Scanning_Development
+  displayName: "Dev Security Scanning"
+  dependsOn:
+  - Build
+  - Security_Scanning_Dev_Artifact
+  condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'DevSecOps1'))
+  jobs:
+  - job: DevSecurityScan
+    displayName: "Run OWASP ZAP, Nmap in Dev"
+    steps:
+    - task: 30f35852-3f7e-4c0c-9a88-e127b4f97211@1
+      inputs:
+        alias: current
+        artifact: "drop"
+    - task: CmdLine@2
+      displayName: 'DAST Scan'
+      inputs:
+        script: |
+          chmod -R 777  ./
+          sudo docker run --rm -v $(pwd):/zap/wrk/:rw --user root zaproxy/zap-stable zap-full-scan.py -t http://10.11.10.200:8062 -g gen.conf -x OWASP-ZAP-Report.xml -r OWASP-ZAP-Report.html
+          ls -al
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: PublishPipelineArtifact@1
+      displayName: "ZAP-Artifact"
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/OWASP-ZAP-Report.xml'
+        artifact: 'ZAP-Result'
+        publishLocation: 'pipeline'
+    - task: CmdLine@2
+      displayName: "Pushing ZAP (DAST) report to Defectdojo"
+      inputs:
+        script: |
+          echo "Current Directory: $(pwd)"
+          chmod 777 OWASP-ZAP-Report.xml
+          echo "$(Build.BuildNumber)"
+          curl --location --request POST 'http://10.102.20.13:8080/api/v2/import-scan/' \
+          -H "Authorization: Token 8724ef4e52197036cb2fc3745a1a30c4a56dc52e" \
+          --form 'engagement="3"' \
+          --form 'verified="true"' \
+          --form 'active="true"' \
+          --form 'lead="1"' \
+          --form 'tags="$(Build.BuildNumber)"' \
+          --form 'scan_type="ZAP Scan"' \
+          --form 'minimum_severity="Info"' \
+          --form 'skip_duplicates="true"' \
+          --form 'close_old_findings="false"' -F 'file=@"OWASP-ZAP-Report.xml"' -v
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: CmdLine@2
+      displayName: "Nmap scanning"
+      inputs:
+        script: 'docker run --rm -v "$(pwd)":/data uzyexe/nmap "$(nmap_hosturl)" -v -A -Pn -sS -sU -oX nmap-report.xml'
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: PublishPipelineArtifact@1
+      displayName: "Nmap-Artifact"
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/nmap-report.xml'
+        artifact: 'Nmap-Result'
+        publishLocation: 'pipeline'
+    - task: CmdLine@2
+      displayName: "Pushing Nmap (Port scan) report to Defectdojo"
+      inputs:
+        script: |
+          echo "Current Directory: $(pwd)"
+          chmod +x nmap-report.xml
+          echo "$(Build.BuildNumber)"
+          curl --location --request POST 'http://10.102.20.13:8080/api/v2/import-scan/' \
+          -H "Authorization: Token 8724ef4e52197036cb2fc3745a1a30c4a56dc52e" \
+          --form 'engagement="3"' \
+          --form 'verified="true"' \
+          --form 'active="true"' \
+          --form 'lead="1"' \
+          --form 'tags="$(Build.BuildNumber)"' \
+          --form 'scan_type="Nmap Scan"' \
+          --form 'minimum_severity="Info"' \
+          --form 'skip_duplicates="true"' \
+          --form 'close_old_findings="false"' -F 'file=@"nmap-report.xml"' -v
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+- stage: Security_Scanning_QA
+  displayName: "QA Security Scanning"
+  dependsOn:
+  - Build
+  condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'b1'))
+  jobs:
+  - job: QASecurityScan
+    displayName: "Run OWASP ZAP, Nmap in QA"
+    steps:
+    - task: 30f35852-3f7e-4c0c-9a88-e127b4f97211@1
+      inputs:
+        alias: current
+        artifact: "drop"
+    - task: CmdLine@2
+      inputs:
+        script: |
+          chmod -R 777  ./
+          sudo docker run --rm -v $(pwd):/zap/wrk/:rw --user root zaproxy/zap-stable zap-full-scan.py -t http://10.11.10.200:8062/ -g gen.conf -x OWASP-ZAP-Report.xml -r OWASP-ZAP-Report.html
+          ls -al
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: PublishPipelineArtifact@1
+      displayName: "ZAP-Artifact"
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/OWASP-ZAP-Report.xml'
+        artifact: 'ZAP-Result'
+        publishLocation: 'pipeline'
+    - task: CmdLine@2
+      displayName: "Pushing ZAP (DAST) report to Defectdojo"
+      inputs:
+        script: |
+          echo "Current Directory: $(pwd)"
+          chmod 777 OWASP-ZAP-Report.xml
+          echo "$(Build.BuildNumber)"
+          curl --location --request POST 'http://10.102.20.13:8080/api/v2/import-scan/' \
+          -H "Authorization: Token 8724ef4e52197036cb2fc3745a1a30c4a56dc52e" \
+          --form 'engagement="3"' \
+          --form 'verified="true"' \
+          --form 'active="true"' \
+          --form 'lead="2"' \
+          --form 'tags="$(Build.BuildNumber)"' \
+          --form 'scan_type="ZAP Scan"' \
+          --form 'minimum_severity="Info"' \
+          --form 'skip_duplicates="true"' \
+          --form 'close_old_findings="false"' -F 'file=@"OWASP-ZAP-Report.xml"' -v
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: CmdLine@2
+      displayName: "Nmap scanning"
+      inputs:
+        script: 'docker run --rm -v "$(pwd)":/data uzyexe/nmap "10.11.10.200:8062/" -sS -sV -oX nmap-report.xml'
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: PublishPipelineArtifact@1
+      displayName: "Nmap-Artifact"
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/nmap-report.xml'
+        artifact: 'Nmap-Result'
+        publishLocation: 'pipeline'
+    - task: CmdLine@2
+      displayName: "Pushing Nmap (Port scan) report to Defectdojo"
+      inputs:
+        script: |
+          echo "Current Directory: $(pwd)"
+          chmod +x nmap-report.xml
+          echo "$(Build.BuildNumber)"
+          curl --location --request POST 'http://10.102.20.13:8080/api/v2/import-scan/' \
+          -H "Authorization: Token 8724ef4e52197036cb2fc3745a1a30c4a56dc52e" \
+          --form 'engagement="3"' \
+          --form 'verified="true"' \
+          --form 'active="true"' \
+          --form 'lead="2"' \
+          --form 'tags="$(Build.BuildNumber)"' \
+          --form 'scan_type="Nmap Scan"' \
+          --form 'minimum_severity="Info"' \
+          --form 'skip_duplicates="true"' \
+          --form 'close_old_findings="false"' -F 'file=@"nmap-report.xml"' -v
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+- stage: Security_Scanning_UAT
+  displayName: "UAT Security Scanning"
+  dependsOn:
+  - Build
+  condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'b2'))
+  jobs:
+  - job: UATSecurityScan
+    displayName: "Run OWASP ZAP, Nmap in UAT"
+    steps:
+    - task: 30f35852-3f7e-4c0c-9a88-e127b4f97211@1
+      inputs:
+        alias: current
+        artifact: "drop"
+    - task: CmdLine@2
+      inputs:
+        script: |
+          chmod -R 777  ./
+          sudo docker run --rm -v $(pwd):/zap/wrk/:rw --user root zaproxy/zap-stable zap-full-scan.py -t http://10.11.10.200:8062/ -g gen.conf -x OWASP-ZAP-Report.xml -r OWASP-ZAP-Report.html
+          ls -al
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: PublishPipelineArtifact@1
+      displayName: "ZAP-Artifact"
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/OWASP-ZAP-Report.xml'
+        artifact: 'ZAP-Result'
+        publishLocation: 'pipeline'
+    - task: CmdLine@2
+      displayName: "Pushing ZAP (DAST) report to Defectdojo"
+      inputs:
+        script: |
+          echo "Current Directory: $(pwd)"
+          chmod 777 OWASP-ZAP-Report.xml
+          echo "$(Build.BuildNumber)"
+          curl --location --request POST 'http://10.102.20.13:8080/api/v2/import-scan/' \
+          -H "Authorization: Token 8724ef4e52197036cb2fc3745a1a30c4a56dc52e" \
+          --form 'engagement="3"' \
+          --form 'verified="true"' \
+          --form 'active="true"' \
+          --form 'lead="2"' \
+          --form 'tags="$(Build.BuildNumber)"' \
+          --form 'scan_type="ZAP Scan"' \
+          --form 'minimum_severity="Info"' \
+          --form 'skip_duplicates="true"' \
+          --form 'close_old_findings="false"' -F 'file=@"OWASP-ZAP-Report.xml"' -v
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: CmdLine@2
+      displayName: "Nmap scanning"
+      inputs:
+        script: 'docker run --rm -v "$(pwd)":/data uzyexe/nmap "10.11.10.200:8062/" -sS -sV -oX nmap-report.xml'
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: PublishPipelineArtifact@1
+      displayName: "Nmap-Artifact"
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/nmap-report.xml'
+        artifact: 'Nmap-Result'
+        publishLocation: 'pipeline'
+    - task: CmdLine@2
+      displayName: "Pushing Nmap (Port scan) report to Defectdojo"
+      inputs:
+        script: |
+          echo "Current Directory: $(pwd)"
+          chmod +x nmap-report.xml
+          echo "$(Build.BuildNumber)"
+          curl --location --request POST 'http://10.102.20.13:8080/api/v2/import-scan/' \
+          -H "Authorization: Token 8724ef4e52197036cb2fc3745a1a30c4a56dc52e" \
+          --form 'engagement="3"' \
+          --form 'verified="true"' \
+          --form 'active="true"' \
+          --form 'lead="2"' \
+          --form 'tags="$(Build.BuildNumber)"' \
+          --form 'scan_type="Nmap Scan"' \
+          --form 'minimum_severity="Info"' \
+          --form 'skip_duplicates="true"' \
+          --form 'close_old_findings="false"' -F 'file=@"nmap-report.xml"' -v
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+- stage: Security_Scanning_Prod
+  displayName: "Prod Security Scanning"
+  dependsOn:
+  - Build
+  condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'b3'))
+  jobs:
+  - job: QASecurityScan
+    displayName: "Run OWASP ZAP, Nmap in Prod"
+    steps:
+    - task: 30f35852-3f7e-4c0c-9a88-e127b4f97211@1
+      inputs:
+        alias: current
+        artifact: "drop"
+    - task: CmdLine@2
+      inputs:
+        script: |
+          chmod -R 777  ./
+          sudo docker run --rm -v $(pwd):/zap/wrk/:rw --user root zaproxy/zap-stable zap-full-scan.py -t http://10.11.10.200:8062/ -g gen.conf -x OWASP-ZAP-Report.xml -r OWASP-ZAP-Report.html
+          ls -al
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: PublishPipelineArtifact@1
+      displayName: "ZAP-Artifact"
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/OWASP-ZAP-Report.xml'
+        artifact: 'ZAP-Result'
+        publishLocation: 'pipeline'
+    - task: CmdLine@2
+      displayName: "Pushing ZAP (DAST) report to Defectdojo"
+      inputs:
+        script: |
+          echo "Current Directory: $(pwd)"
+          chmod 777 OWASP-ZAP-Report.xml
+          echo "$(Build.BuildNumber)"
+          curl --location --request POST 'http://10.102.20.13:8080/api/v2/import-scan/' \
+          -H "Authorization: Token 8724ef4e52197036cb2fc3745a1a30c4a56dc52e" \
+          --form 'engagement="3"' \
+          --form 'verified="true"' \
+          --form 'active="true"' \
+          --form 'lead="2"' \
+          --form 'tags="$(Build.BuildNumber)"' \
+          --form 'scan_type="ZAP Scan"' \
+          --form 'minimum_severity="Info"' \
+          --form 'skip_duplicates="true"' \
+          --form 'close_old_findings="false"' -F 'file=@"OWASP-ZAP-Report.xml"' -v
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: CmdLine@2
+      displayName: "Nmap scanning"
+      inputs:
+        script: 'docker run --rm -v "$(pwd)":/data uzyexe/nmap "10.11.10.200:8062/" -sS -sV -oX nmap-report.xml'
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+    - task: PublishPipelineArtifact@1
+      displayName: "Nmap-Artifact"
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/nmap-report.xml'
+        artifact: 'Nmap-Result'
+        publishLocation: 'pipeline'
+    - task: CmdLine@2
+      displayName: "Pushing Nmap (Port scan) report to Defectdojo"
+      inputs:
+        script: |
+          echo "Current Directory: $(pwd)"
+          chmod +x nmap-report.xml
+          echo "$(Build.BuildNumber)"
+          curl --location --request POST 'http://10.102.20.13:8080/api/v2/import-scan/' \
+          -H "Authorization: Token 8724ef4e52197036cb2fc3745a1a30c4a56dc52e" \
+          --form 'engagement="3"' \
+          --form 'verified="true"' \
+          --form 'active="true"' \
+          --form 'lead="2"' \
+          --form 'tags="$(Build.BuildNumber)"' \
+          --form 'scan_type="Nmap Scan"' \
+          --form 'minimum_severity="Info"' \
+          --form 'skip_duplicates="true"' \
+          --form 'close_old_findings="false"' -F 'file=@"nmap-report.xml"' -v
+        workingDirectory: '$(Build.ArtifactStagingDirectory)/'
+
